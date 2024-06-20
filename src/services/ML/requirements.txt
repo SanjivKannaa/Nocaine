@@ -1,0 +1,7 @@
+torch
+transformers
+confluent_kafka
+BeautifulSoup4
+flask
+pymongo
+docker

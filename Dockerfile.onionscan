@@ -1,0 +1,7 @@
+FROM alpine:latest
+
+RUN apk add --no-cache git libexif-dev go build-base && \
+    export GOPATH=/usr/local && \
+    go install github.com/415ALS/onionscanv3@latest
+
+WORKDIR /home/onionscan

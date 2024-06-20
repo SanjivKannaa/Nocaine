@@ -1,0 +1,530 @@
+version: '3'
+services:
+  nocaine-frontend:
+    container_name: nocaine-frontend-${DEPLOY_SERVER}
+    env_file:
+      - src/env/.env
+    build:
+      context: Frontend
+      dockerfile: Dockerfile
+    ports:
+      - "${frontend_port}:5000"
+    volumes:
+      - ./Frontend:/app
+      - /app/node_modules
+    command:
+      - bash
+      - -c
+      - |
+        npm i
+        if [ "$ENV" == "PROD" ]
+        then
+          npm install -g serve
+          npm run build
+          serve -s build
+        else
+          npm start
+        fi
+    networks:
+      - nocaine
+    restart: always
+
+  nocaine-crawler:
+    container_name: nocaine-crawler-${DEPLOY_SERVER}
+    env_file:
+      - src/env/.env
+    build:
+      context: src/services/crawl
+      dockerfile: Dockerfile.test
+    volumes:
+      - ./src/services/crawl:/app
+    command: 
+      - /bin/sh
+      - -c
+      - |
+        go mod download
+        if [ "$ENV" == "DEV" ]
+        then 
+          go env -w GO111MODULE=auto
+          go install github.com/githubnemo/CompileDaemon@latest
+          /go/bin/CompileDaemon -verbose -color=true -build="sh build.sh" -command="./crawl"
+        else 
+          ./crawl
+        fi
+    restart: always
+    depends_on:
+      - tor
+      - nocaine-db
+      - nocaine-redis-db
+      - zookeeper
+      - broker
+    networks:
+      - nocaine
+    tty: true
+    stdin_open: true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  nocaine-scrapper:
+    container_name: nocaine-scrapper-${DEPLOY_SERVER}
+    env_file:
+      - src/env/.env
+    build:
+      context: src/services/scrape
+      dockerfile: Dockerfile.test
+    volumes:
+      - ./src/services/scrape:/app
+    command: 
+      - /bin/sh
+      - -c
+      - |
+        go mod download
+        if [ "$ENV" == "DEV" ]
+        then 
+          go env -w GO111MODULE=auto
+          go install github.com/githubnemo/CompileDaemon@latest
+          /go/bin/CompileDaemon -verbose -color=true -build="sh build.sh" -command="./scrape"
+        else 
+          ./scrape
+        fi
+    restart: always
+    depends_on:
+      - tor
+      - nocaine-db
+      - nocaine-redis-db
+      - zookeeper
+      - broker
+      - nocaine-middleware
+      - nocaine-ftp-server
+    networks:
+      - nocaine
+    tty: true
+    stdin_open: true
+
+  tor:
+    container_name: tor-proxy
+    restart: always
+    image: dperson/torproxy
+    ports:
+      - 8118:${TOR_PROXY_PORT}
+      - "9050:9050"
+    networks:
+      - nocaine
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  i2p:
+    container_name: i2p-proxy
+    restart: always
+    image: divax/i2p:current
+    environment:
+      - ENABLE_HTTPPROXY=1
+      - ENABLE_SOCKSPROXY=1
+    ports:
+      - "7071:7070"
+      - "4444:4444" # HTTP proxy
+      - "4445:4445" # HTTPS proxy
+    networks:
+      - nocaine
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper
+    restart: always
+    hostname: zookeeper
+    container_name: nocaine-kafka-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - nocaine
+
+  broker:
+    image: confluentinc/cp-kafka
+    container_name: nocaine-kafka-broker
+    ports:
+      - "9092:9092"
+    restart: always
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:9092,PLAINTEXT_INTERNAL://broker:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+    networks:
+      - nocaine
+
+  nocaine-db:
+    container_name: nocaine-mongodb-${DEPLOY_SERVER}
+    env_file:
+      - src/env/.env
+    restart: always
+    image: mongo:latest
+    environment:
+      - MONGO_REPLICA_SET_NAME=rs0
+      - MONGO_REPLICAS=localhost:27017
+      - MONGO_REPLICA_SET_MEMBERS="[{'_id':0,'host':'localhost:27017','priority':1}]"
+      - MONGO_BIND_IP="0.0.0.0"
+    command: ["--keyFile","/data/mongo_key_file.txt","--replSet", "rs0", "--bind_ip_all", "--port", "27017"]
+    # command: ["--replSet", "rs0", "--bind_ip_all", "--port", "27017"]
+    volumes:
+      - ./mongo_key_file.txt:/data/mongo_key_file.txt
+      - mongodb-data:/data/db
+      - mongo1_config:/data/configdb
+      # - ./mongodb/scripts:/scripts
+    healthcheck:
+      test: 'test $$(mongosh -u admin -p password --eval "rs.initiate().ok || rs.status().ok" --quiet) -eq 1'
+      interval: 10s
+      start_period: 1s
+    expose:
+      - ${DB_PORT}
+    networks:
+      - nocaine
+
+  nocaine-redis-db:
+    container_name: nocaine-redis-${DEPLOY_SERVER}
+    env_file:
+      - src/env/.env
+    restart: always
+    image: "redis:alpine"
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    ports:
+      - ${REDIS_PORT}:6379
+      # - ${REDIS_PORT}
+    volumes:
+      - redis-data:/data
+    networks:
+      - nocaine
+
+  nocaine-middleware:
+    container_name: nocaine-middleware-${DEPLOY_SERVER}
+    env_file:
+      - src/env/.env
+    restart: always
+    build:
+      context: src/services/middleware
+      dockerfile: Dockerfile.test
+    volumes:
+      - ./src/services/middleware:/app
+    command:
+      - /bin/sh
+      - -c
+      - |
+        go mod download
+        if [ "$ENV" == "DEV" ]
+        then 
+          go env -w GO111MODULE=auto
+          go install github.com/githubnemo/CompileDaemon@latest
+          /go/bin/CompileDaemon -verbose -color -build="sh build.sh" -command="./middleware"
+        else 
+          ./middleware
+        fi
+    depends_on:
+      - nocaine-crawler
+    networks:
+      - nocaine
+
+  nocaine-ml-client:
+    container_name: nocaine-ML-${DEPLOY_SERVER}
+    env_file:
+      - src/env/.env
+    restart: always
+    build:
+      context: ./src/services/ML
+      dockerfile: Dockerfile
+    command:
+      - /bin/sh
+      - -c
+      - |
+        # sleep 100
+        python3 -u ml_end_point.py
+    depends_on:
+      - nocaine-crawler
+      - nocaine-scrapper
+      - nocaine-ftp-server
+      - broker
+      - zookeeper
+      - archivebox
+      - archivebox_scheduler
+      - onionscan
+      - nocaine-investigation
+    networks:
+      - nocaine
+    volumes:
+      - ./src/services/ML:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  nocaine-api:
+    container_name: nocaine-api-${DEPLOY_SERVER}
+    env_file:
+      - src/env/.env
+    build:
+      context: ./src/services/API
+      dockerfile: Dockerfile
+    command: ["sh","-c","if [[ ${ENV} = DEV ]]; then npm run dev; else npm start; fi"]
+    ports:
+      - ${API}:${API}
+    depends_on:
+      - nocaine-crawler
+      - nocaine-db
+      - nocaine-ftp-server
+      - broker
+      - zookeeper
+      - elasticsearch
+    volumes:
+      - ./src/services/API:/app
+      - /app/node_modules
+    networks:
+      - nocaine
+    restart: always
+    extra_hosts:
+    - "host.docker.internal:host-gateway"
+    
+  nocaine-ftp-server:
+    container_name: nocaine-ftp-${DEPLOY_SERVER}
+    image: fauria/vsftpd
+    ports:
+      - 20:20
+      - 21:21
+    environment:
+      - FTP_USER=${FTP_USER}
+      - FTP_PASS=${FTP_PASS}
+      - LOG_STDOUT="1"
+    volumes:
+      - ./src/services/ftpdata:/home/vsftpd
+      # - src/services/FTP/ftp.log:/var/log/vsftpd.log
+    networks:
+      - nocaine
+    restart: always
+
+  nocaine-cron_job:
+    container_name: nocaine-cron_job-${DEPLOY_SERVER}
+    env_file:
+      - src/env/.env
+    # restart: always
+    build:
+      context: src/services/cron_job
+      dockerfile: Dockerfile
+    command:
+      - /bin/sh
+      - -c
+      - |
+        go mod download
+        if [ "$ENV" == "DEV" ]
+        then 
+          go env -w GO111MODULE=auto
+          go install github.com/githubnemo/CompileDaemon@latest
+          /go/bin/CompileDaemon -verbose -color -build="sh build.sh" -command="./cron_job"
+        else 
+          ./cron_job
+        fi
+    depends_on:
+      - nocaine-crawler
+    networks:
+      - nocaine
+  
+  archivebox:
+    container_name: nocaine-archivebox-${DEPLOY_SERVER}
+    image: ${DOCKER_IMAGE:-archivebox/archivebox:dev}
+    command: server --quick-init 0.0.0.0:8000
+    ports:
+      - 8000:8000
+    volumes:
+      - ./archivebox/data:/data
+      - ./archivebox/etc/crontabs:/var/spool/cron/crontabs  # uncomment this and archivebox_scheduler below to set up automatic recurring archive jobs
+      # - ./archivebox:/app/archivebox             # uncomment this to mount the ArchiveBox source code at runtime (for developers working on archivebox)
+    # build: .                                       # uncomment this to build the image from source code at buildtime (for developers working on archivebox)
+    env_file:
+      - src/env/.env
+    environment:
+      - HTTP_PROXY=socks5://tor-proxy:${TOR_PROXY_PORT}
+      - HTTPS_PROXY=socks5://tor-proxy:${TOR_PROXY_PORT}
+      # - http_proxy=http://127.0.0.1:9050
+      # - https_proxy=http://127.0.0.1:9050
+      - ALLOWED_HOSTS=*                   # restrict this to only accept incoming traffic via specific domain name
+      # - PUBLIC_INDEX=True               # set to False to prevent anonymous users from viewing snapshot list
+      # - PUBLIC_SNAPSHOTS=True           # set to False to prevent anonymous users from viewing snapshot content
+      # - PUBLIC_ADD_VIEW=False           # set to True to allow anonymous users to submit new URLs to archive
+      - ADMIN_USERNAME=${archivebox_USER} # create an admin user on first run with the given user/pass combo
+      - ADMIN_PASSWORD=${archivebox_PASS}
+      # - PUID=911                        # set to your host user's UID & GID if you encounter permissions issues
+      # - PGID=911
+      # - SEARCH_BACKEND_ENGINE=sonic     # uncomment these and sonic container below for better full-text search
+      # - SEARCH_BACKEND_HOST_NAME=sonic
+      # - SEARCH_BACKEND_PASSWORD=SomeSecretPassword
+      # - MEDIA_MAX_SIZE=750m             # increase this filesize limit to allow archiving larger audio/video files
+      - TIMEOUT=200                       # increase this number to 120+ seconds if you see many slow downloads timing out
+      # - CHECK_SSL_VALIDITY=True         # set to False to disable strict SSL checking (allows saving URLs w/ broken certs)
+      # - SAVE_ARCHIVE_DOT_ORG=True       # set to False to disable submitting all URLs to Archive.org when archiving
+      # ...
+      # add further configuration options from archivebox/config.py as needed (to apply them only to this container)
+      # or set using `docker compose run archivebox config --set SOME_KEY=someval` (to persist config across all containers)
+    
+    # For ad-blocking during archiving, uncomment this section and pihole service section below 
+    # networks:
+    #   - dns
+    # dns:
+    #   - 172.20.0.53
+    networks:
+      - nocaine
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      
+  archivebox_scheduler:
+    container_name: nocaine-archivebox-scheduler-${DEPLOY_SERVER}
+    image: ${DOCKER_IMAGE:-archivebox/archivebox:dev}
+    command: schedule --foreground
+    environment:
+      - MEDIA_MAX_SIZE=750m               # increase this number to allow archiving larger audio/video files
+      - TIMEOUT=200                      # increase if you see timeouts often during archiving / on slow networks
+      # - ONLY_NEW=True                   # set to False to retry previously failedit URLs when re-adding instead of skipping them
+      # - CHECK_SSL_VALIDITY=True         # set to False to allow saving URLs w/ broken SSL certs
+      # - SAVE_ARCHIVE_DOT_ORG=True       # set to False to disable submitting URLs to Archive.org when archiving
+      # - PUID=502                        # set to your host user's UID & GID if you encounter permissions issues
+      # - PGID=20
+    volumes:
+        - ./archivebox/data:/data
+        - ./archivebox/etc/crontabs:/var/spool/cron/crontabs
+    # cpus: 2                               # uncomment / edit these values to limit container resource consumption
+    # mem_limit: 2048m
+    # shm_size: 1024m
+  # nginx:
+  #   image: nginx:alpine
+  #   ports:
+  #     - 443:443
+  #     - 80:80
+  #   volumes:
+  #     - ./archivebox/etc/nginx.conf:/etc/nginx/nginx.conf
+  #     - ./archivebox/data:/var/www
+  onionscan:
+    container_name: onionscan
+    build: 
+      context: .
+      dockerfile: Dockerfile.onionscan
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: always
+    volumes:
+      - onionscan:/home/onionscan
+    command: ["tail","-f","/dev/null"]
+    networks:
+      - nocaine
+
+  nocaine-investigation:
+    container_name: nocaine-investigation-${DEPLOY_SERVER}
+    restart: always
+    env_file:
+      - src/env/.env
+    build:
+      context: ./src/services/investigation
+      dockerfile: Dockerfile
+    command:
+      - /bin/sh
+      - -c
+      - |
+        # sleep 100
+        python3 -u main.py
+    depends_on:
+      - onionscan
+      - nocaine-redis-db
+    volumes:
+      - ./src/services/investigation:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - nocaine
+
+  elasticsearch:
+    container_name: nocaine-elasticsearch-${DEPLOY_SERVER}
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.11.1
+    restart: always
+    ports:
+      - 9200:9200
+      - 9300:9300
+    environment:
+      - discovery.type=single-node
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    networks:
+      - nocaine
+
+  monstache:
+    image: rwynn/monstache:6.7.2
+    container_name: c-monstache
+    working_dir: /app
+    command: -f ./monstache.config.toml
+    volumes:
+      - ./monstache.config.toml:/app/monstache.config.toml
+      # - ./plugin/plugin.so:/app/plugin.so
+    depends_on:
+      - nocaine-db
+      - elasticsearch
+    ports:
+      - "8080:8080"
+    networks:
+      - nocaine
+    healthcheck:
+      test: "wget -q -O - http://localhost:8080/healthz"
+      interval: 10s
+      timeout: 30s
+      retries: 300
+    restart: unless-stopped
+  
+  nocaine-uptime:
+    container_name: nocaine-uptime-cron-${DEPLOY_SERVER}
+    env_file:
+      - src/env/.env
+    build:
+      context: src/services/uptime
+      dockerfile: Dockerfile.test
+    volumes:
+      - ./src/services/uptime:/app
+    command: 
+      - /bin/sh
+      - -c
+      - |
+        go mod download
+        if [ "$ENV" == "DEV" ]
+        then 
+          go env -w GO111MODULE=auto
+          go install github.com/githubnemo/CompileDaemon@latest
+          /go/bin/CompileDaemon -verbose -color=true -build="sh build.sh" -command="./uptime"
+        else 
+          ./uptime
+        fi
+    restart: always
+    depends_on:
+      - nocaine-db
+    networks:
+      - nocaine
+
+volumes:
+  mongodb-data:
+    external: false
+  mongo1_config:
+    external: false
+  redis-data:
+    external: false
+  ftp-data:
+    external: false
+  onionscan:
+    external: false
+  esdata:
+    external: false
+  # archivebox_data:
+  #   external: false
+  # archivebox_scheduler_data:
+  #   external: false
+
+networks:
+  nocaine:
+    name: nocaine
+    external: false

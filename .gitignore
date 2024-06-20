@@ -1,0 +1,17 @@
+src/services/crawl/crawl
+src/services/scrape/scrape
+src/services/middleware/middleware
+src/services/uptime/uptime
+node_modules
+src/env/.env
+src/services/crawl/url_queue.json
+# src/services/ML/pytorch_model.bin
+# src/services/API2/pytorch_model.bin
+pic.zip
+src/services/ftpdata/myuser/*
+archivebox
+.env
+old_stuff/*
+onionscan
+dummy.json
+mongo_key_file.txt

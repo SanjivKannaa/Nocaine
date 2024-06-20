@@ -1,0 +1,12 @@
+mongo-url = "mongodb://admin:password@nocaine-db:27017/?replicaSet=rs0"
+
+elasticsearch-urls = ["http://elasticsearch:9200"]
+elasticsearch-max-seconds = 5
+elasticsearch-max-conns = 6
+
+change-stream-namespaces = [""]
+direct-read-namespaces = [""]
+
+verbose = false
+
+enable-http-server = true
